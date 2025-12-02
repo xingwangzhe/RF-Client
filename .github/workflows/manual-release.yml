@@ -1,0 +1,80 @@
+name: 手动发布
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    name: 构建并创建草稿发布
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 6.0.x
+
+      - name: 还原依赖
+        run: dotnet restore Ra2Client.sln
+
+      - name: 编译客户端
+        run: dotnet build RA2Client/Ra2Client.csproj --configuration Release
+
+      - name: 读取版本号
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$csproj = Get-Content -Path "RA2Client/Ra2Client.csproj"
+          $version = $csproj.Project.PropertyGroup | ForEach-Object { $_.Version } | Where-Object { $_ } | Select-Object -First 1
+          if (-not $version) {
+            throw "Version not found in RA2Client/Ra2Client.csproj"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: 整理发布文件
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $buildDir = Join-Path $PWD "Bin/Resources/Binaries"
+          $exeSource = Join-Path $buildDir "RA2Client.exe"
+          if (-not (Test-Path $exeSource)) {
+            throw "Expected executable not found at $exeSource"
+          }
+          $artifactDir = Join-Path $PWD "artifacts"
+          New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+          $exeTarget = Join-Path $artifactDir ("重聚未来-$env:VERSION.exe")
+          Copy-Item -Path $exeSource -Destination $exeTarget -Force
+          $zipTarget = Join-Path $artifactDir ("重聚未来-$env:VERSION.zip")
+          Compress-Archive -Path $exeSource -DestinationPath $zipTarget -Force
+
+      - name: 创建草稿发布
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: 重聚未来 ${{ steps.version.outputs.version }}
+          body: |
+            ## 重聚未来 ${{ steps.version.outputs.version }}
+
+            > 请将以下占位符替换为本次更新的具体内容。
+
+            ### 更新内容
+            - TODO：在此填写主要更新说明
+
+            ### 构建信息
+            - 版本号：${{ steps.version.outputs.version }}
+            - 自动构建：${{ github.workflow }} #${{ github.run_number }}
+            - 提交哈希：${{ github.sha }}
+
+
+            **压缩包为.exe文件的压缩，节省下载流量**
+
+          files: |
+            artifacts/重聚未来-${{ steps.version.outputs.version }}.exe
+            artifacts/重聚未来-${{ steps.version.outputs.version }}.zip
