@@ -5,7 +5,7 @@ on:
 
 jobs:
   build-and-release:
-    name: 构建并导出产物
+    name: 构建并导出双平台产物
     runs-on: windows-latest
     permissions:
       contents: write
@@ -19,25 +19,31 @@ jobs:
           dotnet-version: 6.0.x
 
       - name: 还原依赖
-        run: dotnet restore Ra2Client.sln
+        run: dotnet restore Ra2Client.sln --runtime win-x64 --runtime win-arm64
 
       - name: 设置发布目录变量
         shell: pwsh
         run: |
-          $publishDir = Join-Path $PWD "publish"
-          "PUBLISH_DIR=$publishDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $baseDir = Join-Path $PWD "publish"
+          "PUBLISH_BASE=$baseDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: 发布客户端
+      - name: 多平台发布
         shell: pwsh
         run: |
-          dotnet publish RA2Client/Ra2Client.csproj `
-            --configuration Release `
-            --runtime win-x86 `
-            --self-contained false `
-            --no-restore `
-            -p:UseAppHost=true `
-            -p:IsPublishable=true `
-            -p:PublishDir="$env:PUBLISH_DIR"
+          $rids = @('win-x64','win-arm64')
+          New-Item -ItemType Directory -Path $env:PUBLISH_BASE -Force | Out-Null
+          foreach ($rid in $rids) {
+            $targetDir = Join-Path $env:PUBLISH_BASE $rid
+            Write-Host "发布 $rid 到 $targetDir"
+            dotnet publish RA2Client/Ra2Client.csproj `
+              --configuration Release `
+              --runtime $rid `
+              --self-contained false `
+              --no-restore `
+              -p:UseAppHost=true `
+              -p:IsPublishable=true `
+              -p:PublishDir="$targetDir"
+          }
 
       - name: 读取版本号
         id: version
@@ -51,53 +57,42 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: 查找构建产物
-        shell: pwsh
-        run: |
-          if (-not (Test-Path $env:PUBLISH_DIR)) {
-            throw "未找到发布目录：$env:PUBLISH_DIR"
-          }
-          $exe = Get-ChildItem -Path $env:PUBLISH_DIR -Filter "RA2Client.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $exe) {
-            throw "未在 $env:PUBLISH_DIR 内找到 RA2Client.exe"
-          }
-          Write-Host "找到可执行文件：$($exe.FullName)"
-          "EXE_PATH=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       - name: 检查发布目录
         shell: pwsh
         run: |
           Write-Host "发布目录结构："
-          Get-ChildItem -Path $env:PUBLISH_DIR -Recurse | ForEach-Object {
+          Get-ChildItem -Path $env:PUBLISH_BASE -Recurse | ForEach-Object {
             "{0}`t{1}" -f $_.FullName, $_.Length
           }
 
       - name: 上传发布产物便于检查
         uses: actions/upload-artifact@v4
         with:
-          name: publish-folder
-          path: ${{ env.PUBLISH_DIR }}
+          name: publish-folders
+          path: publish/
 
       - name: 准备发布文件
         shell: pwsh
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if (-not $env:EXE_PATH) {
-            throw "环境变量 EXE_PATH 未设置"
-          }
-          if (-not (Test-Path $env:EXE_PATH)) {
-            throw "未找到可执行文件：$env:EXE_PATH"
-          }
-
           $artifactDir = Join-Path $PWD "artifacts"
           New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
 
-          $exeTarget = Join-Path $artifactDir ("重聚未来-$env:VERSION.exe")
-          Copy-Item -Path $env:EXE_PATH -Destination $exeTarget -Force
+          $rids = @('win-x64','win-arm64')
+          foreach ($rid in $rids) {
+            $publishDir = Join-Path $env:PUBLISH_BASE $rid
+            $exePath = Join-Path $publishDir "RA2Client.exe"
+            if (-not (Test-Path $exePath)) {
+              throw "未在 $publishDir 找到 RA2Client.exe"
+            }
 
-          $zipTarget = Join-Path $artifactDir ("重聚未来-$env:VERSION.zip")
-          Compress-Archive -Path $exeTarget -DestinationPath $zipTarget -Force
+            $exeTarget = Join-Path $artifactDir "重聚未来-$env:VERSION-$rid.exe"
+            Copy-Item -Path $exePath -Destination $exeTarget -Force
+
+            $zipTarget = Join-Path $artifactDir "重聚未来-$env:VERSION-$rid.zip"
+            Compress-Archive -Path $exeTarget -DestinationPath $zipTarget -Force
+          }
 
           "ARTIFACT_DIR=$artifactDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -112,9 +107,9 @@ jobs:
         with:
           draft: true
           tag_name: ${{ steps.version.outputs.tag }}
-          name: 重聚未来 ${{ steps.version.outputs.version }}
+          name: 重聚未来 ${{ steps.version.outputs.version }} 多平台预览
           body: |
-            ## 重聚未来 ${{ steps.version.outputs.version }}
+            ## 重聚未来 ${{ steps.version.outputs.version }} 多平台构建
 
             > 请将以下占位符替换为本次更新的具体内容。
 
@@ -125,10 +120,14 @@ jobs:
             - 版本号：${{ steps.version.outputs.version }}
             - 自动构建：${{ github.workflow }} #${{ github.run_number }}
             - 提交哈希：${{ github.sha }}
+            - win-x64：适用于常规 64 位 Windows 设备
+            - win-arm64：适用于基于 ARM 的 Windows 设备（如 Surface Pro X）
 
 
-            **压缩包为.exe文件的压缩，节省下载流量**
+            **压缩包为对应平台 .exe 的压缩包，用于节省下载带宽**
 
           files: |
-            artifacts/重聚未来-${{ steps.version.outputs.version }}.exe
-            artifacts/重聚未来-${{ steps.version.outputs.version }}.zip
+            artifacts/重聚未来-${{ steps.version.outputs.version }}-win-x64.exe
+            artifacts/重聚未来-${{ steps.version.outputs.version }}-win-x64.zip
+            artifacts/重聚未来-${{ steps.version.outputs.version }}-win-arm64.exe
+            artifacts/重聚未来-${{ steps.version.outputs.version }}-win-arm64.zip
