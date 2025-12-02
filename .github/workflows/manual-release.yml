@@ -21,8 +21,23 @@ jobs:
       - name: 还原依赖
         run: dotnet restore Ra2Client.sln
 
+      - name: 设置发布目录变量
+        shell: pwsh
+        run: |
+          $publishDir = Join-Path $PWD "publish"
+          "PUBLISH_DIR=$publishDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: 发布客户端
-        run: dotnet publish RA2Client/Ra2Client.csproj --configuration Release --runtime win-x86 --self-contained false --no-restore -p:UseAppHost=true
+        shell: pwsh
+        run: |
+          dotnet publish RA2Client/Ra2Client.csproj `
+            --configuration Release `
+            --runtime win-x86 `
+            --self-contained false `
+            --no-restore `
+            -p:UseAppHost=true `
+            -p:IsPublishable=true `
+            -p:PublishDir="$env:PUBLISH_DIR"
 
       - name: 读取版本号
         id: version
@@ -37,74 +52,83 @@ jobs:
           "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: 查找构建产物
-        id: find_artifacts
         shell: pwsh
         run: |
-          $workspace = $env:GITHUB_WORKSPACE
-          Write-Host "工作目录：$workspace"
-          $exeCandidates = Get-ChildItem -Path $workspace -Filter "RA2Client.exe" -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName
-          if ($exeCandidates.Count -eq 0) {
-            Write-Warning "未在工作目录内找到 RA2Client.exe"
-            "found=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-            exit 0
+          if (-not (Test-Path $env:PUBLISH_DIR)) {
+            throw "未找到发布目录：$env:PUBLISH_DIR"
           }
-
-          Write-Host "找到以下候选文件："
-          $exeCandidates | ForEach-Object {
-            Write-Host (" - {0}" -f $_.FullName)
+          $exe = Get-ChildItem -Path $env:PUBLISH_DIR -Filter "RA2Client.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) {
+            throw "未在 $env:PUBLISH_DIR 内找到 RA2Client.exe"
           }
-
-          $preferred = $exeCandidates | Where-Object { $_.FullName -match "publish" } | Select-Object -First 1
-          if (-not $preferred) {
-            $preferred = $exeCandidates | Select-Object -First 1
-          }
-
-          $targetDir = $preferred.Directory.FullName
-          Write-Host "选定发布目录：$targetDir"
-
-          "found=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "publish-dir=$targetDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "找到可执行文件：$($exe.FullName)"
+          "EXE_PATH=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: 检查发布目录
-        if: ${{ steps.find_artifacts.outputs.found == 'true' }}
         shell: pwsh
-        env:
-          TARGET_DIR: ${{ steps.find_artifacts.outputs.publish-dir }}
         run: |
           Write-Host "发布目录结构："
-          Get-ChildItem -Path $env:TARGET_DIR -Recurse | ForEach-Object {
+          Get-ChildItem -Path $env:PUBLISH_DIR -Recurse | ForEach-Object {
             "{0}`t{1}" -f $_.FullName, $_.Length
           }
 
       - name: 上传发布产物便于检查
-        if: ${{ steps.find_artifacts.outputs.found == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: publish-folder
-          path: ${{ steps.find_artifacts.outputs.publish-dir }}
+          path: ${{ env.PUBLISH_DIR }}
 
-      # - name: 创建草稿发布
-      #   uses: softprops/action-gh-release@v2
-      #   with:
-      #     draft: true
-      #     tag_name: ${{ steps.version.outputs.tag }}
-      #     name: 重聚未来 ${{ steps.version.outputs.version }}
-      #     body: |
-      #       ## 重聚未来 ${{ steps.version.outputs.version }}
-      #
-      #       > 请将以下占位符替换为本次更新的具体内容。
-      #
-      #       ### 更新内容
-      #       - TODO：在此填写主要更新说明
-      #
-      #       ### 构建信息
-      #       - 版本号：${{ steps.version.outputs.version }}
-      #       - 自动构建：${{ github.workflow }} #${{ github.run_number }}
-      #       - 提交哈希：${{ github.sha }}
-      #
-      #
-      #       **压缩包为.exe文件的压缩，节省下载流量**
-      #
-      #     files: |
-      #       artifacts/重聚未来-${{ steps.version.outputs.version }}.exe
-      #       artifacts/重聚未来-${{ steps.version.outputs.version }}.zip
+      - name: 准备发布文件
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if (-not $env:EXE_PATH) {
+            throw "环境变量 EXE_PATH 未设置"
+          }
+          if (-not (Test-Path $env:EXE_PATH)) {
+            throw "未找到可执行文件：$env:EXE_PATH"
+          }
+
+          $artifactDir = Join-Path $PWD "artifacts"
+          New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+
+          $exeTarget = Join-Path $artifactDir ("重聚未来-$env:VERSION.exe")
+          Copy-Item -Path $env:EXE_PATH -Destination $exeTarget -Force
+
+          $zipTarget = Join-Path $artifactDir ("重聚未来-$env:VERSION.zip")
+          Compress-Archive -Path $exeTarget -DestinationPath $zipTarget -Force
+
+          "ARTIFACT_DIR=$artifactDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 上传发布文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: artifacts/
+
+      - name: 创建草稿发布
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: 重聚未来 ${{ steps.version.outputs.version }}
+          body: |
+            ## 重聚未来 ${{ steps.version.outputs.version }}
+
+            > 请将以下占位符替换为本次更新的具体内容。
+
+            ### 更新内容
+            - TODO：在此填写主要更新说明
+
+            ### 构建信息
+            - 版本号：${{ steps.version.outputs.version }}
+            - 自动构建：${{ github.workflow }} #${{ github.run_number }}
+            - 提交哈希：${{ github.sha }}
+
+
+            **压缩包为.exe文件的压缩，节省下载流量**
+
+          files: |
+            artifacts/重聚未来-${{ steps.version.outputs.version }}.exe
+            artifacts/重聚未来-${{ steps.version.outputs.version }}.zip
