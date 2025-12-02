@@ -9,6 +9,8 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+    env:
+      PUBLISH_DIR: ${{ github.workspace }}\publish
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -22,7 +24,7 @@ jobs:
         run: dotnet restore Ra2Client.sln
 
       - name: 发布客户端
-        run: dotnet publish RA2Client/Ra2Client.csproj --configuration Release --runtime win-x86 --self-contained false --no-restore -p:UseAppHost=true --output publish
+        run: dotnet publish RA2Client/Ra2Client.csproj --configuration Release --runtime win-x86 --self-contained false --no-restore -p:UseAppHost=true --output "$env:PUBLISH_DIR"
 
       - name: 读取版本号
         id: version
@@ -39,12 +41,11 @@ jobs:
       - name: 检查发布目录
         shell: pwsh
         run: |
-          $publishDir = Join-Path $PWD "publish"
-          if (-not (Test-Path $publishDir)) {
-            throw "Publish directory not found: $publishDir"
+          if (-not (Test-Path $env:PUBLISH_DIR)) {
+            throw "Publish directory not found: $env:PUBLISH_DIR"
           }
           Write-Host "发布目录结构："
-          Get-ChildItem -Path $publishDir -Recurse | ForEach-Object {
+          Get-ChildItem -Path $env:PUBLISH_DIR -Recurse | ForEach-Object {
             "{0}`t{1}" -f $_.FullName, $_.Length
           }
 
@@ -52,7 +53,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: publish-folder
-          path: publish/
+          path: ${{ env.PUBLISH_DIR }}
 
       # - name: 创建草稿发布
       #   uses: softprops/action-gh-release@v2
