@@ -4,11 +4,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-release:
-    name: 构建并导出双平台产物
+  build-win-x64:
+    name: 构建 win-x64 产物
     runs-on: windows-latest
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -18,38 +21,19 @@ jobs:
         with:
           dotnet-version: 6.0.x
 
-      - name: 还原依赖
-        shell: pwsh
-        run: |
-          $rids = @('win-x64','win-arm64')
-          foreach ($rid in $rids) {
-            Write-Host "还原运行时：$rid"
-            dotnet restore Ra2Client.sln --runtime $rid
-          }
+      - name: 还原依赖 (win-x64)
+        run: dotnet restore Ra2Client.sln --runtime win-x64
 
-      - name: 设置发布目录变量
-        shell: pwsh
+      - name: 发布客户端 (win-x64)
         run: |
-          $baseDir = Join-Path $PWD "publish"
-          "PUBLISH_BASE=$baseDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: 多平台发布
-        shell: pwsh
-        run: |
-          $rids = @('win-x64','win-arm64')
-          New-Item -ItemType Directory -Path $env:PUBLISH_BASE -Force | Out-Null
-          foreach ($rid in $rids) {
-            $targetDir = Join-Path $env:PUBLISH_BASE $rid
-            Write-Host "发布 $rid 到 $targetDir"
-            dotnet publish RA2Client/Ra2Client.csproj `
-              --configuration Release `
-              --runtime $rid `
-              --self-contained false `
-              --no-restore `
-              -p:UseAppHost=true `
-              -p:IsPublishable=true `
-              -p:PublishDir="$targetDir"
-          }
+          dotnet publish RA2Client/Ra2Client.csproj ^
+            --configuration Release ^
+            --runtime win-x64 ^
+            --self-contained false ^
+            --no-restore ^
+            -p:UseAppHost=true ^
+            -p:IsPublishable=true ^
+            -p:PublishDir="publish/win-x64/"
 
       - name: 读取版本号
         id: version
@@ -63,59 +47,191 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: 检查发布目录
-        shell: pwsh
-        run: |
-          Write-Host "发布目录结构："
-          Get-ChildItem -Path $env:PUBLISH_BASE -Recurse | ForEach-Object {
-            "{0}`t{1}" -f $_.FullName, $_.Length
-          }
+      - name: 安装 Inno Setup (win-x64)
+        run: choco install innosetup --no-progress -y
 
-      - name: 上传发布产物便于检查
-        uses: actions/upload-artifact@v4
-        with:
-          name: publish-folders
-          path: publish/
-
-      - name: 准备发布文件
+      - name: 生成安装程序 (win-x64)
         shell: pwsh
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          $artifactDir = Join-Path $PWD "artifacts"
-          New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
-
-          $rids = @('win-x64','win-arm64')
-          foreach ($rid in $rids) {
-            $publishDir = Join-Path $env:PUBLISH_BASE $rid
-            $exePath = Join-Path $publishDir "RA2Client.exe"
-            if (-not (Test-Path $exePath)) {
-              throw "未在 $publishDir 找到 RA2Client.exe"
-            }
-
-            $exeTarget = Join-Path $artifactDir "重聚未来-$env:VERSION-$rid.exe"
-            Copy-Item -Path $exePath -Destination $exeTarget -Force
-
-            $zipTarget = Join-Path $artifactDir "重聚未来-$env:VERSION-$rid.zip"
-            Compress-Archive -Path $exeTarget -DestinationPath $zipTarget -Force
+          $publishDir = Join-Path $PWD "publish/win-x64"
+          if (-not (Test-Path $publishDir)) {
+            throw "未找到发布目录：$publishDir"
           }
 
-          "ARTIFACT_DIR=$artifactDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $issPath = Join-Path $PWD "installer-win-x64.iss"
+          @"
+          [Setup]
+          AppName=重聚未来
+          AppVersion={#Version}
+          DefaultDirName={pf64}\重聚未来
+          DefaultGroupName=重聚未来
+          OutputBaseFilename=重聚未来-{#Version}-win-x64-setup
+          Compression=lzma
+          SolidCompression=yes
 
-      - name: 上传发布文件
+          [Files]
+          Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+
+          [Icons]
+          Name: "{group}\重聚未来"; Filename: "{app}\RA2Client.exe"
+          Name: "{commondesktop}\重聚未来"; Filename: "{app}\RA2Client.exe"; Tasks: desktopicon
+
+          [Tasks]
+          Name: "desktopicon"; Description: "在桌面创建快捷方式"; GroupDescription: "其他任务："
+          "@ | Set-Content -Path $issPath -Encoding UTF8
+
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' `
+            /DVersion=$env:VERSION `
+            /DSourceDir=$publishDir `
+            $issPath
+
+          $artifacts = Join-Path $PWD "artifacts"
+          New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
+          Get-ChildItem -Path $PWD -Filter "重聚未来-$env:VERSION-win-x64-setup.exe" -Recurse | ForEach-Object {
+            Copy-Item $_.FullName -Destination (Join-Path $artifacts $_.Name) -Force
+          }
+
+      - name: 打包 win-x64 目录
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $publishDir = Join-Path $PWD "publish/win-x64"
+          if (-not (Test-Path $publishDir)) {
+            throw "未找到发布目录：$publishDir"
+          }
+
+          $artifacts = Join-Path $PWD "artifacts"
+          New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
+
+          $zipPath = Join-Path $artifacts "重聚未来-$env:VERSION-win-x64.zip"
+          Compress-Archive -Path (Join-Path $publishDir '*') -DestinationPath $zipPath -Force
+
+      - name: 上传构建产物 (win-x64)
         uses: actions/upload-artifact@v4
         with:
-          name: release-files
+          name: release-files-win-x64
           path: artifacts/
+
+  build-win-arm64:
+    name: 构建 win-arm64 产物
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    needs: build-win-x64
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 6.0.x
+
+      - name: 还原依赖 (win-arm64)
+        run: dotnet restore Ra2Client.sln --runtime win-arm64
+
+      - name: 发布客户端 (win-arm64)
+        run: |
+          dotnet publish RA2Client/Ra2Client.csproj ^
+            --configuration Release ^
+            --runtime win-arm64 ^
+            --self-contained false ^
+            --no-restore ^
+            -p:UseAppHost=true ^
+            -p:IsPublishable=true ^
+            -p:PublishDir="publish/win-arm64/"
+
+      - name: 安装 Inno Setup (win-arm64)
+        run: choco install innosetup --no-progress -y
+
+      - name: 生成安装程序 (win-arm64)
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.build-win-x64.outputs.version }}
+        run: |
+          $publishDir = Join-Path $PWD "publish/win-arm64"
+          if (-not (Test-Path $publishDir)) {
+            throw "未找到发布目录：$publishDir"
+          }
+
+          $issPath = Join-Path $PWD "installer-win-arm64.iss"
+          @"
+          [Setup]
+          AppName=重聚未来
+          AppVersion={#Version}
+          DefaultDirName={pf}\重聚未来
+          DefaultGroupName=重聚未来
+          OutputBaseFilename=重聚未来-{#Version}-win-arm64-setup
+          Compression=lzma
+          SolidCompression=yes
+
+          [Files]
+          Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+
+          [Icons]
+          Name: "{group}\重聚未来"; Filename: "{app}\RA2Client.exe"
+          Name: "{commondesktop}\重聚未来"; Filename: "{app}\RA2Client.exe"; Tasks: desktopicon
+
+          [Tasks]
+          Name: "desktopicon"; Description: "在桌面创建快捷方式"; GroupDescription: "其他任务："
+          "@ | Set-Content -Path $issPath -Encoding UTF8
+
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' `
+            /DVersion=$env:VERSION `
+            /DSourceDir=$publishDir `
+            $issPath
+
+          $artifacts = Join-Path $PWD "artifacts"
+          New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
+          Get-ChildItem -Path $PWD -Filter "重聚未来-$env:VERSION-win-arm64-setup.exe" -Recurse | ForEach-Object {
+            Copy-Item $_.FullName -Destination (Join-Path $artifacts $_.Name) -Force
+          }
+
+      - name: 打包 win-arm64 目录
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.build-win-x64.outputs.version }}
+        run: |
+          $publishDir = Join-Path $PWD "publish/win-arm64"
+          if (-not (Test-Path $publishDir)) {
+            throw "未找到发布目录：$publishDir"
+          }
+
+          $artifacts = Join-Path $PWD "artifacts"
+          New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
+
+          $zipPath = Join-Path $artifacts "重聚未来-$env:VERSION-win-arm64.zip"
+          Compress-Archive -Path (Join-Path $publishDir '*') -DestinationPath $zipPath -Force
+
+      - name: 上传构建产物 (win-arm64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files-win-arm64
+          path: artifacts/
+
+  draft-release:
+    name: 创建草稿发布
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs: [build-win-x64, build-win-arm64]
+    steps:
+      - name: 下载所有构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
       - name: 创建草稿发布
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: 重聚未来 ${{ steps.version.outputs.version }} 多平台预览
+          tag_name: ${{ needs.build-win-x64.outputs.tag }}
+          name: 重聚未来 ${{ needs.build-win-x64.outputs.version }} 多平台预览
           body: |
-            ## 重聚未来 ${{ steps.version.outputs.version }} 多平台构建
+            ## 重聚未来 ${{ needs.build-win-x64.outputs.version }} 多平台构建
 
             > 请将以下占位符替换为本次更新的具体内容。
 
@@ -123,17 +239,17 @@ jobs:
             - TODO：在此填写主要更新说明
 
             ### 构建信息
-            - 版本号：${{ steps.version.outputs.version }}
+            - 版本号：${{ needs.build-win-x64.outputs.version }}
             - 自动构建：${{ github.workflow }} #${{ github.run_number }}
             - 提交哈希：${{ github.sha }}
             - win-x64：适用于常规 64 位 Windows 设备
             - win-arm64：适用于基于 ARM 的 Windows 设备（如 Surface Pro X）
 
 
-            **压缩包为对应平台 .exe 的压缩包，用于节省下载带宽**
+            **每个安装包为对应平台的 Inno Setup 安装程序，可直接运行安装；压缩包为免安装版完整目录，可解压后运行 RA2Client.exe。**
 
           files: |
-            artifacts/重聚未来-${{ steps.version.outputs.version }}-win-x64.exe
-            artifacts/重聚未来-${{ steps.version.outputs.version }}-win-x64.zip
-            artifacts/重聚未来-${{ steps.version.outputs.version }}-win-arm64.exe
-            artifacts/重聚未来-${{ steps.version.outputs.version }}-win-arm64.zip
+            artifacts/release-files-win-x64/重聚未来-${{ needs.build-win-x64.outputs.version }}-win-x64.zip
+            artifacts/release-files-win-arm64/重聚未来-${{ needs.build-win-x64.outputs.version }}-win-arm64.zip
+            artifacts/release-files-win-x64/重聚未来-${{ needs.build-win-x64.outputs.version }}-win-x64-setup.exe
+            artifacts/release-files-win-arm64/重聚未来-${{ needs.build-win-x64.outputs.version }}-win-arm64-setup.exe
