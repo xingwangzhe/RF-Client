@@ -9,8 +9,6 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
-    env:
-      PUBLISH_DIR: ${{ github.workspace }}\publish
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -24,7 +22,7 @@ jobs:
         run: dotnet restore Ra2Client.sln
 
       - name: 发布客户端
-        run: dotnet publish RA2Client/Ra2Client.csproj --configuration Release --runtime win-x86 --self-contained false --no-restore -p:UseAppHost=true --output "$env:PUBLISH_DIR"
+        run: dotnet publish RA2Client/Ra2Client.csproj --configuration Release --runtime win-x86 --self-contained false --no-restore -p:UseAppHost=true
 
       - name: 读取版本号
         id: version
@@ -38,22 +36,52 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: 检查发布目录
+      - name: 查找构建产物
+        id: find_artifacts
         shell: pwsh
         run: |
-          if (-not (Test-Path $env:PUBLISH_DIR)) {
-            throw "Publish directory not found: $env:PUBLISH_DIR"
+          $workspace = $env:GITHUB_WORKSPACE
+          Write-Host "工作目录：$workspace"
+          $exeCandidates = Get-ChildItem -Path $workspace -Filter "RA2Client.exe" -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName
+          if ($exeCandidates.Count -eq 0) {
+            Write-Warning "未在工作目录内找到 RA2Client.exe"
+            "found=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            exit 0
           }
+
+          Write-Host "找到以下候选文件："
+          $exeCandidates | ForEach-Object {
+            Write-Host (" - {0}" -f $_.FullName)
+          }
+
+          $preferred = $exeCandidates | Where-Object { $_.FullName -match "publish" } | Select-Object -First 1
+          if (-not $preferred) {
+            $preferred = $exeCandidates | Select-Object -First 1
+          }
+
+          $targetDir = $preferred.Directory.FullName
+          Write-Host "选定发布目录：$targetDir"
+
+          "found=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "publish-dir=$targetDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: 检查发布目录
+        if: ${{ steps.find_artifacts.outputs.found == 'true' }}
+        shell: pwsh
+        env:
+          TARGET_DIR: ${{ steps.find_artifacts.outputs.publish-dir }}
+        run: |
           Write-Host "发布目录结构："
-          Get-ChildItem -Path $env:PUBLISH_DIR -Recurse | ForEach-Object {
+          Get-ChildItem -Path $env:TARGET_DIR -Recurse | ForEach-Object {
             "{0}`t{1}" -f $_.FullName, $_.Length
           }
 
       - name: 上传发布产物便于检查
+        if: ${{ steps.find_artifacts.outputs.found == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: publish-folder
-          path: ${{ env.PUBLISH_DIR }}
+          path: ${{ steps.find_artifacts.outputs.publish-dir }}
 
       # - name: 创建草稿发布
       #   uses: softprops/action-gh-release@v2
