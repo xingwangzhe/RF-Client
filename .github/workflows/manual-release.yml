@@ -21,8 +21,8 @@ jobs:
       - name: 还原依赖
         run: dotnet restore Ra2Client.sln
 
-      - name: 编译客户端
-        run: dotnet build RA2Client/Ra2Client.csproj --configuration Release
+      - name: 发布客户端
+        run: dotnet publish RA2Client/Ra2Client.csproj --configuration Release --runtime win-x86 --self-contained false --no-restore -p:UseAppHost=true --output publish
 
       - name: 读取版本号
         id: version
@@ -41,8 +41,8 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          $buildDir = Join-Path $PWD "Bin/Resources/Binaries"
-          $exeSource = Join-Path $buildDir "RA2Client.exe"
+          $publishDir = Join-Path $PWD "publish"
+          $exeSource = Join-Path $publishDir "RA2Client.exe"
           if (-not (Test-Path $exeSource)) {
             throw "Expected executable not found at $exeSource"
           }
@@ -51,7 +51,7 @@ jobs:
           $exeTarget = Join-Path $artifactDir ("重聚未来-$env:VERSION.exe")
           Copy-Item -Path $exeSource -Destination $exeTarget -Force
           $zipTarget = Join-Path $artifactDir ("重聚未来-$env:VERSION.zip")
-          Compress-Archive -Path $exeSource -DestinationPath $zipTarget -Force
+          Compress-Archive -Path $exeTarget -DestinationPath $zipTarget -Force
 
       - name: 创建草稿发布
         uses: softprops/action-gh-release@v2
