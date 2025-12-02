@@ -4,14 +4,37 @@ on:
   workflow_dispatch:
 
 jobs:
+  get-version:
+    name: 读取版本号
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$csproj = Get-Content -Path "RA2Client/Ra2Client.csproj"
+          $version = $csproj.Project.PropertyGroup | ForEach-Object { $_.Version } | Where-Object { $_ } | Select-Object -First 1
+          if (-not $version) {
+            throw "Version not found in RA2Client/Ra2Client.csproj"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
   build-win-x64:
     name: 构建 win-x64 产物
     runs-on: windows-latest
     permissions:
       contents: read
+    needs: get-version
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ needs.get-version.outputs.version }}
+      tag: ${{ needs.get-version.outputs.tag }}
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -25,27 +48,15 @@ jobs:
         run: dotnet restore Ra2Client.sln --runtime win-x64
 
       - name: 发布客户端 (win-x64)
-        run: |
-          dotnet publish RA2Client/Ra2Client.csproj ^
-            --configuration Release ^
-            --runtime win-x64 ^
-            --self-contained false ^
-            --no-restore ^
-            -p:UseAppHost=true ^
-            -p:IsPublishable=true ^
-            -p:PublishDir="publish/win-x64/"
-
-      - name: 读取版本号
-        id: version
-        shell: pwsh
-        run: |
-          [xml]$csproj = Get-Content -Path "RA2Client/Ra2Client.csproj"
-          $version = $csproj.Project.PropertyGroup | ForEach-Object { $_.Version } | Where-Object { $_ } | Select-Object -First 1
-          if (-not $version) {
-            throw "Version not found in RA2Client/Ra2Client.csproj"
-          }
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "tag=v$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        run: >-
+          dotnet publish RA2Client/Ra2Client.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained false
+          --no-restore
+          -p:UseAppHost=true
+          -p:IsPublishable=true
+          -p:PublishDir="publish/win-x64/"
 
       - name: 安装 Inno Setup (win-x64)
         run: choco install innosetup --no-progress -y
@@ -53,7 +64,7 @@ jobs:
       - name: 生成安装程序 (win-x64)
         shell: pwsh
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.get-version.outputs.version }}
         run: |
           $publishDir = Join-Path $PWD "publish/win-x64"
           if (-not (Test-Path $publishDir)) {
@@ -96,7 +107,7 @@ jobs:
       - name: 打包 win-x64 目录
         shell: pwsh
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.get-version.outputs.version }}
         run: |
           $publishDir = Join-Path $PWD "publish/win-x64"
           if (-not (Test-Path $publishDir)) {
@@ -120,7 +131,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
-    needs: build-win-x64
+    needs: get-version
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -134,15 +145,15 @@ jobs:
         run: dotnet restore Ra2Client.sln --runtime win-arm64
 
       - name: 发布客户端 (win-arm64)
-        run: |
-          dotnet publish RA2Client/Ra2Client.csproj ^
-            --configuration Release ^
-            --runtime win-arm64 ^
-            --self-contained false ^
-            --no-restore ^
-            -p:UseAppHost=true ^
-            -p:IsPublishable=true ^
-            -p:PublishDir="publish/win-arm64/"
+        run: >-
+          dotnet publish RA2Client/Ra2Client.csproj
+          --configuration Release
+          --runtime win-arm64
+          --self-contained false
+          --no-restore
+          -p:UseAppHost=true
+          -p:IsPublishable=true
+          -p:PublishDir="publish/win-arm64/"
 
       - name: 安装 Inno Setup (win-arm64)
         run: choco install innosetup --no-progress -y
@@ -150,7 +161,7 @@ jobs:
       - name: 生成安装程序 (win-arm64)
         shell: pwsh
         env:
-          VERSION: ${{ needs.build-win-x64.outputs.version }}
+          VERSION: ${{ needs.get-version.outputs.version }}
         run: |
           $publishDir = Join-Path $PWD "publish/win-arm64"
           if (-not (Test-Path $publishDir)) {
@@ -193,7 +204,7 @@ jobs:
       - name: 打包 win-arm64 目录
         shell: pwsh
         env:
-          VERSION: ${{ needs.build-win-x64.outputs.version }}
+          VERSION: ${{ needs.get-version.outputs.version }}
         run: |
           $publishDir = Join-Path $PWD "publish/win-arm64"
           if (-not (Test-Path $publishDir)) {
@@ -217,7 +228,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    needs: [build-win-x64, build-win-arm64]
+    needs: [get-version, build-win-x64, build-win-arm64]
     steps:
       - name: 下载所有构建产物
         uses: actions/download-artifact@v4
@@ -228,10 +239,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          tag_name: ${{ needs.build-win-x64.outputs.tag }}
-          name: 重聚未来 ${{ needs.build-win-x64.outputs.version }} 多平台预览
+          tag_name: ${{ needs.get-version.outputs.tag }}
+          name: 重聚未来 ${{ needs.get-version.outputs.version }} 多平台预览
           body: |
-            ## 重聚未来 ${{ needs.build-win-x64.outputs.version }} 多平台构建
+            ## 重聚未来 ${{ needs.get-version.outputs.version }} 多平台构建
 
             > 请将以下占位符替换为本次更新的具体内容。
 
@@ -239,7 +250,7 @@ jobs:
             - TODO：在此填写主要更新说明
 
             ### 构建信息
-            - 版本号：${{ needs.build-win-x64.outputs.version }}
+            - 版本号：${{ needs.get-version.outputs.version }}
             - 自动构建：${{ github.workflow }} #${{ github.run_number }}
             - 提交哈希：${{ github.sha }}
             - win-x64：适用于常规 64 位 Windows 设备
@@ -249,7 +260,7 @@ jobs:
             **每个安装包为对应平台的 Inno Setup 安装程序，可直接运行安装；压缩包为免安装版完整目录，可解压后运行 RA2Client.exe。**
 
           files: |
-            artifacts/release-files-win-x64/重聚未来-${{ needs.build-win-x64.outputs.version }}-win-x64.zip
-            artifacts/release-files-win-arm64/重聚未来-${{ needs.build-win-x64.outputs.version }}-win-arm64.zip
-            artifacts/release-files-win-x64/重聚未来-${{ needs.build-win-x64.outputs.version }}-win-x64-setup.exe
-            artifacts/release-files-win-arm64/重聚未来-${{ needs.build-win-x64.outputs.version }}-win-arm64-setup.exe
+            artifacts/release-files-win-x64/重聚未来-${{ needs.get-version.outputs.version }}-win-x64.zip
+            artifacts/release-files-win-arm64/重聚未来-${{ needs.get-version.outputs.version }}-win-arm64.zip
+            artifacts/release-files-win-x64/重聚未来-${{ needs.get-version.outputs.version }}-win-x64-setup.exe
+            artifacts/release-files-win-arm64/重聚未来-${{ needs.get-version.outputs.version }}-win-arm64-setup.exe
